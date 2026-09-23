@@ -10,31 +10,30 @@ st.set_page_config(page_title="Generador de Gafetes", page_icon="🪪", layout="
 
 st.title("🪪 Generador de Gafetes Oficiales")
 st.write(
-    "Selecciona a los empleados requeridos para generar sus gafetes en formato **ODP** conservando exactamente el diseño original."
+    "Selecciona a los empleados requeridos para generar sus gafetes en formato **ODP** conservando exactamente el diseño y formato institucional."
 )
 
-# --- 1. DETECCIÓN AUTOMÁTICA DE ARCHIVOS ---
-def buscar_archivo_plantilla():
-    # Busca variantes de nombre comunes para evitar errores de mayúsculas/minúsculas
-    posibles_nombres = [
+# --- 1. DETECCIÓN / CARGA DE ARCHIVOS ---
+st.sidebar.header("📁 Configuración de Plantilla")
+
+def buscar_plantilla_local():
+    posibles = [
         "PLANTILLA MAESTRA.odp",
         "plantilla_maestra.odp",
         "Plantilla_Maestra.odp",
         "Plantilla Maestra.odp",
-        "PLANTILLA_MAESTRA.odp",
     ]
-    for nombre in posibles_nombres:
-        if os.path.exists(nombre):
-            return nombre
-    # Si hay algún archivo con extensión .odp en la carpeta, toma ese
+    for p in posibles:
+        if os.path.exists(p):
+            return p
     for f in os.listdir("."):
         if f.lower().endswith(".odp"):
             return f
     return None
 
-archivo_plantilla = buscar_archivo_plantilla()
+plantilla_subida = st.sidebar.file_uploader("Subir nueva plantilla (.odp) si deseas cambiarla:", type=["odp"])
+archivo_plantilla = plantilla_subida if plantilla_subida is not None else buscar_plantilla_local()
 
-# Cargar base de datos
 @st.cache_data
 def cargar_base():
     posibles_excel = ["base.xlsx", "BASE.xlsx", "Base.xlsx"]
@@ -43,7 +42,6 @@ def cargar_base():
             df = pd.read_excel(f)
             df.columns = [str(c).strip() for c in df.columns]
             return df
-    # Si hay algún .xlsx
     for f in os.listdir("."):
         if f.lower().endswith(".xlsx") and not f.startswith("~$"):
             df = pd.read_excel(f)
@@ -53,21 +51,20 @@ def cargar_base():
 
 df = cargar_base()
 
-# Validaciones iniciales
 if df is None:
     st.error("❌ No se encontró el archivo 'base.xlsx' en el repositorio.")
     st.stop()
 
 if archivo_plantilla is None:
-    st.error("❌ No se encontró el archivo de la plantilla ODP en el repositorio.")
+    st.error("❌ No se encontró la plantilla ODP. Súbela en la barra lateral o al repositorio de GitHub.")
     st.stop()
 
-# --- 2. DETECCIÓN DE COLUMNAS ---
+# --- 2. COLUMNAS ---
 col_num = next((c for c in df.columns if "NUM" in c.upper() or "EMPLEADO" in c.upper()), "NUMERO DE EMPLEADO")
 col_nom = next((c for c in df.columns if "NOMBRE" in c.upper()), "Nombre completo")
 col_pto = next((c for c in df.columns if "PUESTO" in c.upper()), "Puesto")
 
-# --- 3. INTERFAZ DE USUARIO ---
+# --- 3. SELECTOR DE EMPLEADOS ---
 col_chk, _ = st.columns([2, 2])
 with col_chk:
     seleccionar_todos = st.checkbox("Seleccionar todos los empleados de la lista")
@@ -79,23 +76,122 @@ if seleccionar_todos:
 else:
     seleccionados = st.multiselect("Empleados a generar:", opciones)
 
-# --- 4. MOTOR DE GENERACIÓN ODP ---
-def generar_odp(df_seleccionados, ruta_plantilla):
-    with open(ruta_plantilla, "rb") as f:
-        template_bytes = f.read()
+# --- 4. FUNCIONES DE APOYO XML / COORDENADAS ---
+def parse_coord_cm(val_str):
+    if not val_str:
+        return None
+    s = str(val_str).strip().lower()
+    try:
+        if s.endswith("cm"):
+            return float(s[:-2])
+        elif s.endswith("mm"):
+            return float(s[:-2]) / 10.0
+        elif s.endswith("in"):
+            return float(s[:-2]) * 2.54
+        elif s.endswith("pt"):
+            return float(s[:-2]) * (2.54 / 72.0)
+        else:
+            return float(s)
+    except Exception:
+        return None
+
+def obtener_y_cm(elem):
+    y_attr = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}y")
+    if y_attr:
+        v = parse_coord_cm(y_attr)
+        if v is not None:
+            return v
+    for child in elem.iter():
+        y_c = child.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}y")
+        if y_c:
+            v = parse_coord_cm(y_c)
+            if v is not None:
+                return v
+    return None
+
+def actualizar_textos_gafete(elemento, nombre, puesto, num_emp, folio_num):
+    text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    
+    for p in elemento.iter(f"{{{text_ns}}}p"):
+        p_text = "".join(p.itertext())
+        if not p_text.strip():
+            continue
+            
+        # 1. Nombre del empleado (Frente y Firma)
+        if "Citlalli" in p_text or "*Citlalli" in p_text:
+            spans = p.findall(f"{{{text_ns}}}span")
+            if spans:
+                spans[0].text = f"C. *{nombre}*"
+                for s in spans[1:]:
+                    s.text = ""
+            else:
+                p.text = f"C. *{nombre}*"
+
+        # 2. Puesto
+        elif "ANALISTA" in p_text or "*ANALISTA*" in p_text:
+            puesto_val = puesto if (pd.notna(puesto) and str(puesto).strip()) else ""
+            spans = p.findall(f"{{{text_ns}}}span")
+            if spans:
+                reemplazado = False
+                for s in spans:
+                    if s.text and "ANALISTA" in s.text:
+                        s.text = s.text.replace("*ANALISTA*", f"*{puesto_val}*").replace("ANALISTA", puesto_val)
+                        reemplazado = True
+                if not reemplazado:
+                    spans[0].text = f"*{puesto_val}*"
+            else:
+                p.text = p_text.replace("*ANALISTA*", f"*{puesto_val}*").replace("ANALISTA", puesto_val)
+
+        # 3. Código DDUMA-EMP-
+        elif "DDUMA-EMP-" in p_text:
+            spans = p.findall(f"{{{text_ns}}}span")
+            if spans:
+                spans[0].text = f"DDUMA-EMP-*{num_emp}*"
+                for s in spans[1:]:
+                    s.text = ""
+            else:
+                p.text = f"DDUMA-EMP-*{num_emp}*"
+
+        # 4. Número de empleado
+        elif "NO. DE EMPLEADO" in p_text:
+            spans = p.findall(f"{{{text_ns}}}span")
+            if spans:
+                spans[0].text = f"NO. DE EMPLEADO:*{num_emp}*"
+                for s in spans[1:]:
+                    s.text = ""
+            else:
+                p.text = f"NO. DE EMPLEADO:*{num_emp}*"
+
+        # 5. Folio
+        elif "/DDUMA/" in p_text:
+            nuevo_folio = f"*{folio_num:03d}*/DDUMA/2026 "
+            spans = p.findall(f"{{{text_ns}}}span")
+            if spans:
+                spans[0].text = nuevo_folio
+                for s in spans[1:]:
+                    s.text = ""
+            else:
+                p.text = nuevo_folio
+
+# --- 5. MOTOR DE GENERACIÓN ODP ---
+def generar_odp(df_seleccionados, fuente_plantilla):
+    if isinstance(fuente_plantilla, str):
+        with open(fuente_plantilla, "rb") as f:
+            template_bytes = f.read()
+    else:
+        fuente_plantilla.seek(0)
+        template_bytes = fuente_plantilla.read()
 
     in_zip = zipfile.ZipFile(io.BytesIO(template_bytes), "r")
     out_buffer = io.BytesIO()
     out_zip = zipfile.ZipFile(out_buffer, "w", zipfile.ZIP_DEFLATED)
 
-    # Copiar todos los archivos internos excepto content.xml
     for item in in_zip.infolist():
         if item.filename != "content.xml":
             out_zip.writestr(item, in_zip.read(item.filename))
 
     xml_text = in_zip.read("content.xml").decode("utf-8")
 
-    # Mantener los namespaces originales
     namespaces = dict([node for _, node in ET.iterparse(io.StringIO(xml_text), events=["start-ns"])])
     for prefix, uri in namespaces.items():
         ET.register_namespace(prefix, uri)
@@ -113,76 +209,51 @@ def generar_odp(df_seleccionados, ruta_plantilla):
 
     pagina_maestra = paginas[0]
 
-    # Limpiar las páginas base para colocar las generadas
     for p in paginas:
         body.remove(p)
-
-    def reemplazar_en_nodo(elem, mapa):
-        if elem.text:
-            for k, v in mapa.items():
-                if k in elem.text:
-                    elem.text = elem.text.replace(k, str(v))
-        if elem.tail:
-            for k, v in mapa.items():
-                if k in elem.tail:
-                    elem.tail = elem.tail.replace(k, str(v))
-        for hijo in elem:
-            reemplazar_en_nodo(hijo, mapa)
 
     filas = list(df_seleccionados.iterrows())
     pagina_idx = 1
 
-    # Procesar de 2 en 2 por hoja Carta (gafete arriba y gafete abajo)
+    # Procesar de 2 en 2 por hoja (arriba y abajo)
     for i in range(0, len(filas), 2):
         emp1 = filas[i][1]
-        emp2 = filas[i + 1][1] if i + 1 < len(filas) else None
+        emp2 = filas[i + 1][1] if (i + 1 < len(filas)) else None
 
         nueva_pagina = copy.deepcopy(pagina_maestra)
         nueva_pagina.set(f"{{{draw_ns}}}name", f"Hoja_{pagina_idx}")
         pagina_idx += 1
 
         elementos = [e for e in nueva_pagina if not e.tag.endswith("notes")]
-        mitad = len(elementos) // 2
-        gafete_arriba = elementos[:mitad]
-        gafete_abajo = elementos[mitad:]
 
-        # Mapeo primer empleado (arriba)
+        elementos_arriba = []
+        elementos_abajo = []
+
+        for el in elementos:
+            y_pos = obtener_y_cm(el)
+            if y_pos is None:
+                continue
+            if y_pos < 14.0:
+                elementos_arriba.append(el)
+            else:
+                elementos_abajo.append(el)
+
+        # 1. Asignar datos al gafete de arriba (Empleado 1)
         nom1 = str(emp1.get(col_nom, "")).strip()
         num1 = str(emp1.get(col_num, "")).strip()
         pto1 = str(emp1.get(col_pto, "")).strip() if pd.notna(emp1.get(col_pto)) else ""
-        folio1 = f"{i + 1:03d}"
+        for el in elementos_arriba:
+            actualizar_textos_gafete(el, nom1, pto1, num1, i + 1)
 
-        mapa_g1 = {
-            "*Citlalli Estefanía Brown Ocaña*": nom1,
-            "*Citlalli": nom1,
-            "Ocaña*": "",
-            "*ANALISTA*": pto1,
-            "*9820*": num1,
-            "*041*": folio1,
-        }
-        for el in gafete_arriba:
-            reemplazar_en_nodo(el, mapa_g1)
-
-        # Mapeo segundo empleado (abajo)
+        # 2. Asignar datos al gafete de abajo (Empleado 2) o retirarlo si es impar
         if emp2 is not None:
             nom2 = str(emp2.get(col_nom, "")).strip()
             num2 = str(emp2.get(col_num, "")).strip()
             pto2 = str(emp2.get(col_pto, "")).strip() if pd.notna(emp2.get(col_pto)) else ""
-            folio2 = f"{i + 2:03d}"
-
-            mapa_g2 = {
-                "*Citlalli Estefanía Brown Ocaña*": nom2,
-                "*Citlalli": nom2,
-                "Ocaña*": "",
-                "*ANALISTA*": pto2,
-                "*9820*": num2,
-                "*041*": folio2,
-            }
-            for el in gafete_abajo:
-                reemplazar_en_nodo(el, mapa_g2)
+            for el in elementos_abajo:
+                actualizar_textos_gafete(el, nom2, pto2, num2, i + 2)
         else:
-            # Si el total seleccionado es impar, se elimina el segundo gafete en blanco
-            for el in gafete_abajo:
+            for el in elementos_abajo:
                 nueva_pagina.remove(el)
 
         body.append(nueva_pagina)
@@ -193,16 +264,20 @@ def generar_odp(df_seleccionados, ruta_plantilla):
     out_buffer.seek(0)
     return out_buffer
 
-# --- 5. BOTÓN DE EXPORTACIÓN ---
+# --- 6. BOTÓN DE EXPORTACIÓN ---
 if st.button("Generar y Exportar ODP", type="primary"):
     if not seleccionados:
-        st.warning("⚠️ Debes seleccionar al menos a un empleado.")
+        st.warning("⚠️ Selecciona al menos a un empleado.")
     else:
-        df_sel = df[df[col_nom].isin(seleccionados)]
-        with st.spinner("Procesando y generando archivo ODP..."):
+        # Mantener el orden exacto en el que el usuario los fue seleccionando
+        df_filtrado = df[df[col_nom].isin(seleccionados)].copy()
+        df_filtrado["_orden_sel"] = df_filtrado[col_nom].map({nombre: idx for idx, nombre in enumerate(seleccionados)})
+        df_sel = df_filtrado.sort_values("_orden_sel").drop(columns=["_orden_sel"])
+
+        with st.spinner("Creando archivo ODP con los gafetes seleccionados..."):
             try:
                 archivo_odp_listo = generar_odp(df_sel, archivo_plantilla)
-                st.success(f"✅ ¡Gafetes generados exitosamente para {len(df_sel)} empleado(s)!")
+                st.success(f"✅ ¡Se generaron los gafetes para los {len(df_sel)} empleados sin duplicados!")
                 st.download_button(
                     label="📥 Descargar Gafetes (.odp)",
                     data=archivo_odp_listo,
