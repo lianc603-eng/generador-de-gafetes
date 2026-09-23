@@ -14,7 +14,7 @@ st.set_page_config(page_title="Generador de Gafetes", page_icon="🪪", layout="
 
 st.title("🪪 Generador de Gafetes Oficiales")
 st.write(
-    "Genera tus gafetes en formato **ODP** o **PowerPoint (PPTX)** con 2 trabajadores distintos por hoja tamaño Carta."
+    "Genera gafetes en formato **ODP** o **PowerPoint (PPTX)** con 2 trabajadores por hoja tamaño Carta."
 )
 
 # --- 1. DETECCIÓN DE ARCHIVOS ---
@@ -77,7 +77,6 @@ def limpiar_id(val):
         return str(val).strip()
 
 def parse_y_cm(elem):
-    """Calcula la posición vertical del elemento en cm."""
     y_str = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}y")
     if not y_str:
         for ch in elem.iter():
@@ -101,14 +100,21 @@ def parse_y_cm(elem):
         return None
 
 def asignar_texto_limpio(parrafo, texto_nuevo):
-    """Asigna el texto nuevo de forma limpia sin asteriscos ni duplicaciones."""
+    """
+    Elimina TODOS los textos de spans previos para evitar que queden
+    números o palabras fantasmas (como '*9820*') pegadas al texto nuevo.
+    """
     text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
-    spans = parrafo.findall(f"{{{text_ns}}}span")
+    
+    # 1. Vaciar cualquier texto previo en el párrafo y todos sus hijos
+    for el in parrafo.iter():
+        el.text = ""
+        el.tail = ""
+
+    # 2. Asignar el nuevo valor exclusivamente al primer span (conservando su estilo)
+    spans = list(parrafo.iter(f"{{{text_ns}}}span"))
     if spans:
         spans[0].text = texto_nuevo
-        for s in spans[1:]:
-            s.text = ""
-        parrafo.text = None
     else:
         parrafo.text = texto_nuevo
 
@@ -120,39 +126,35 @@ def procesar_elemento(elem, nombre, puesto, num_emp, folio):
         if not p_text:
             continue
 
-        # Evitar sobreescribir las etiquetas fijas
+        # Proteger textos fijos que no se deben modificar
         if p_text in ["Se autoriza al", "Como:", "Firma del Trabajador"]:
             continue
 
-        # 1. Caja de ID / Número de empleado (detecta 'ID:', 'ID :', 'NO. DE EMPLEADO', etc.)
-        if p_text.upper().startswith("ID:") or p_text.upper().startswith("ID :") or "ID:" in p_text.upper() or "ID :" in p_text.upper():
+        # 1. Caja de ID (detecta 'ID:', 'ID :', 'NO. DE EMPLEADO', etc.)
+        if any(k in p_text.upper() for k in ["ID:", "ID :", "NO. DE EMPLEADO", "EMPLEADO:"]):
             asignar_texto_limpio(p, f"ID: {num_emp}")
 
-        elif "NO. DE EMPLEADO" in p_text.upper() or "EMPLEADO:" in p_text.upper():
-            asignar_texto_limpio(p, f"NO. DE EMPLEADO:{num_emp}")
-
         # 2. Código institucional DDUMA-EMP-
-        elif "DDUMA-EMP" in p_text:
+        elif "DDUMA-EMP" in p_text.upper():
             asignar_texto_limpio(p, f"DDUMA-EMP-{num_emp}")
 
         # 3. Nombre del trabajador (Frente y Firma)
-        elif "Citlalli" in p_text or "Brown" in p_text or p_text.startswith("C. *") or p_text.startswith("C.*") or p_text.startswith("C. "):
+        elif "CITLALLI" in p_text.upper() or "BROWN" in p_text.upper() or p_text.startswith("C. *") or p_text.startswith("C.*") or p_text.startswith("C. "):
             asignar_texto_limpio(p, f"C. {nombre}")
 
         # 4. Puesto del trabajador
-        elif "ANALISTA" in p_text or ("*" in p_text and any(c.isalpha() for c in p_text) and not "DDUMA" in p_text):
+        elif "ANALISTA" in p_text.upper() or ("*" in p_text and any(c.isalpha() for c in p_text) and not "DDUMA" in p_text.upper()):
             asignar_texto_limpio(p, puesto)
 
         # 5. Folio Consecutivo
-        elif "/DDUMA/" in p_text:
+        elif "/DDUMA/" in p_text.upper():
             asignar_texto_limpio(p, f"{folio:03d}/DDUMA/2026")
 
-        # 6. Reemplazo de respaldo si hay un número suelto entre asteriscos
-        elif re.search(r'\*\d+\*', p_text):
-            nuevo = re.sub(r'\*\d+\*', num_emp, p_text)
-            asignar_texto_limpio(p, nuevo)
+        # 6. Caja residual que contenga únicamente el número de ejemplo
+        elif "9820" in p_text or re.search(r'\*\d+\*', p_text):
+            asignar_texto_limpio(p, num_emp)
 
-        # Limpieza residual de cualquier asterisco que hubiera quedado
+        # Limpieza de asteriscos por seguridad
         if p.text and "*" in p.text:
             p.text = p.text.replace("*", "")
         for s in p.findall(f"{{{text_ns}}}span"):
@@ -236,7 +238,6 @@ def generar_odp(df_sel, ruta_plantilla):
             for el in elementos_abajo:
                 procesar_elemento(el, nom2, pto2, num2, i + 2)
         else:
-            # Si el total seleccionado es impar, se eliminan los elementos del gafete de abajo
             for el in elementos_abajo:
                 nueva_pagina.remove(el)
 
