@@ -117,17 +117,17 @@ def actualizar_textos_gafete(elemento, nombre, puesto, num_emp, folio_num):
         if not p_text.strip():
             continue
             
-        # 1. Nombre del empleado (Frente y Firma)
+        # 1. Nombre del empleado (Frente y Firma) - SIN asteriscos
         if "Citlalli" in p_text or "*Citlalli" in p_text:
             spans = p.findall(f"{{{text_ns}}}span")
             if spans:
-                spans[0].text = f"C. *{nombre}*"
+                spans[0].text = f"C. {nombre}"
                 for s in spans[1:]:
                     s.text = ""
             else:
-                p.text = f"C. *{nombre}*"
+                p.text = f"C. {nombre}"
 
-        # 2. Puesto
+        # 2. Puesto - SIN asteriscos
         elif "ANALISTA" in p_text or "*ANALISTA*" in p_text:
             puesto_val = puesto if (pd.notna(puesto) and str(puesto).strip()) else ""
             spans = p.findall(f"{{{text_ns}}}span")
@@ -135,36 +135,38 @@ def actualizar_textos_gafete(elemento, nombre, puesto, num_emp, folio_num):
                 reemplazado = False
                 for s in spans:
                     if s.text and "ANALISTA" in s.text:
-                        s.text = s.text.replace("*ANALISTA*", f"*{puesto_val}*").replace("ANALISTA", puesto_val)
+                        s.text = puesto_val
                         reemplazado = True
+                    elif s.text:
+                        s.text = s.text.replace("*", "")
                 if not reemplazado:
-                    spans[0].text = f"*{puesto_val}*"
+                    spans[0].text = puesto_val
             else:
-                p.text = p_text.replace("*ANALISTA*", f"*{puesto_val}*").replace("ANALISTA", puesto_val)
+                p.text = puesto_val
 
-        # 3. Código DDUMA-EMP-
+        # 3. Código DDUMA-EMP- - SIN asteriscos
         elif "DDUMA-EMP-" in p_text:
             spans = p.findall(f"{{{text_ns}}}span")
             if spans:
-                spans[0].text = f"DDUMA-EMP-*{num_emp}*"
+                spans[0].text = f"DDUMA-EMP-{num_emp}"
                 for s in spans[1:]:
                     s.text = ""
             else:
-                p.text = f"DDUMA-EMP-*{num_emp}*"
+                p.text = f"DDUMA-EMP-{num_emp}"
 
-        # 4. Número de empleado
+        # 4. Número de empleado - SIN asteriscos
         elif "NO. DE EMPLEADO" in p_text:
             spans = p.findall(f"{{{text_ns}}}span")
             if spans:
-                spans[0].text = f"NO. DE EMPLEADO:*{num_emp}*"
+                spans[0].text = f"NO. DE EMPLEADO:{num_emp}"
                 for s in spans[1:]:
                     s.text = ""
             else:
-                p.text = f"NO. DE EMPLEADO:*{num_emp}*"
+                p.text = f"NO. DE EMPLEADO:{num_emp}"
 
-        # 5. Folio
+        # 5. Folio consecutivo - SIN asteriscos
         elif "/DDUMA/" in p_text:
-            nuevo_folio = f"*{folio_num:03d}*/DDUMA/2026 "
+            nuevo_folio = f"{folio_num:03d}/DDUMA/2026 "
             spans = p.findall(f"{{{text_ns}}}span")
             if spans:
                 spans[0].text = nuevo_folio
@@ -172,6 +174,13 @@ def actualizar_textos_gafete(elemento, nombre, puesto, num_emp, folio_num):
                     s.text = ""
             else:
                 p.text = nuevo_folio
+
+        # Limpieza de cualquier asterisco residual que pudiera quedar
+        if p.text and "*" in p.text:
+            p.text = p.text.replace("*", "")
+        for s in p.findall(f"{{{text_ns}}}span"):
+            if s.text and "*" in s.text:
+                s.text = s.text.replace("*", "")
 
 # --- 5. MOTOR DE GENERACIÓN ODP ---
 def generar_odp(df_seleccionados, fuente_plantilla):
@@ -269,15 +278,15 @@ if st.button("Generar y Exportar ODP", type="primary"):
     if not seleccionados:
         st.warning("⚠️ Selecciona al menos a un empleado.")
     else:
-        # Mantener el orden exacto en el que el usuario los fue seleccionando
+        # Mantener el orden exacto en el que el usuario seleccionó
         df_filtrado = df[df[col_nom].isin(seleccionados)].copy()
         df_filtrado["_orden_sel"] = df_filtrado[col_nom].map({nombre: idx for idx, nombre in enumerate(seleccionados)})
         df_sel = df_filtrado.sort_values("_orden_sel").drop(columns=["_orden_sel"])
 
-        with st.spinner("Creando archivo ODP con los gafetes seleccionados..."):
+        with st.spinner("Creando archivo ODP limpio y sin asteriscos..."):
             try:
                 archivo_odp_listo = generar_odp(df_sel, archivo_plantilla)
-                st.success(f"✅ ¡Se generaron los gafetes para los {len(df_sel)} empleados sin duplicados!")
+                st.success(f"✅ ¡Se generaron los gafetes para {len(df_sel)} empleado(s) con formato limpio!")
                 st.download_button(
                     label="📥 Descargar Gafetes (.odp)",
                     data=archivo_odp_listo,
