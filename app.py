@@ -13,10 +13,10 @@ st.set_page_config(page_title="Generador de Gafetes", page_icon="🪪", layout="
 
 st.title("🪪 Generador de Gafetes Oficiales")
 st.write(
-    "Selecciona a los empleados y elige el formato deseado (**ODP** de LibreOffice o **PPTX** de PowerPoint)."
+    "Selecciona a los empleados y personaliza el formato de visualización y exportación."
 )
 
-# --- 1. DETECCIÓN / CARGA DE ARCHIVOS ---
+# --- 1. DETECCIÓN Y CARGA DE ARCHIVOS ---
 st.sidebar.header("📁 Configuración de Plantilla")
 
 def buscar_plantilla_local():
@@ -25,6 +25,7 @@ def buscar_plantilla_local():
         "plantilla_maestra.odp",
         "Plantilla_Maestra.odp",
         "Plantilla Maestra.odp",
+        "PLANTILLA_MAESTRA.odp",
     ]
     for p in posibles:
         if os.path.exists(p):
@@ -34,7 +35,7 @@ def buscar_plantilla_local():
             return f
     return None
 
-plantilla_subida = st.sidebar.file_uploader("Subir plantilla diferente (.odp):", type=["odp"])
+plantilla_subida = st.sidebar.file_uploader("Subir nueva plantilla (.odp):", type=["odp"])
 archivo_plantilla = plantilla_subida if plantilla_subida is not None else buscar_plantilla_local()
 
 @st.cache_data
@@ -59,25 +60,43 @@ if df is None:
     st.stop()
 
 if archivo_plantilla is None:
-    st.error("❌ No se encontró la plantilla ODP. Súbela en la barra lateral o a GitHub.")
+    st.error("❌ No se encontró la plantilla ODP. Súbela en la barra lateral o al repositorio de GitHub.")
     st.stop()
 
-# --- 2. COLUMNAS ---
+# Identificar columnas
 col_num = next((c for c in df.columns if "NUM" in c.upper() or "EMPLEADO" in c.upper()), "NUMERO DE EMPLEADO")
 col_nom = next((c for c in df.columns if "NOMBRE" in c.upper()), "Nombre completo")
 col_pto = next((c for c in df.columns if "PUESTO" in c.upper()), "Puesto")
 
-# --- 3. SELECTOR DE EMPLEADOS Y FORMATO ---
-col_chk, col_fmt = st.columns([2, 2])
-with col_chk:
-    seleccionar_todos = st.checkbox("Seleccionar todos los empleados de la lista")
+# --- 2. OPCIONES DE FORMATO ---
+col_opt1, col_opt2, col_opt3 = st.columns(3)
 
-with col_fmt:
+with col_opt1:
+    orden_nombre = st.radio(
+        "Orden del Nombre:",
+        options=["Apellidos primero (como en Excel)", "Nombre(s) primero"],
+        index=0,
+        help="El archivo Excel viene por defecto con los apellidos primero."
+    )
+
+with col_opt2:
+    estilo_capitalizacion = st.radio(
+        "Formato de texto:",
+        options=["MAYÚSCULAS COMPLETAS", "Tipo Nombre Propio (Título)"],
+        index=0
+    )
+
+with col_opt3:
     formato_salida = st.radio(
         "Formato de descarga:",
-        options=["ODP (LibreOffice / OpenDocument)", "PPTX (Microsoft PowerPoint)", "Ambos formatos (ZIP)"],
-        horizontal=True,
+        options=["ODP (LibreOffice)", "PPTX (PowerPoint)", "Ambos formatos (ZIP)"],
+        index=0
     )
+
+# --- 3. SELECTOR DE EMPLEADOS ---
+col_chk, _ = st.columns([2, 2])
+with col_chk:
+    seleccionar_todos = st.checkbox("Seleccionar todos los empleados de la lista")
 
 opciones = df[col_nom].dropna().tolist()
 
@@ -86,7 +105,35 @@ if seleccionar_todos:
 else:
     seleccionados = st.multiselect("Empleados a generar:", opciones)
 
-# --- 4. FUNCIONES DE APOYO XML / COORDENADAS ---
+# --- 4. FUNCIONES DE FORMATEO Y XML ---
+def transformar_nombre(texto_nombre, orden, estilo):
+    if not texto_nombre or pd.isna(texto_nombre):
+        return ""
+    texto = str(texto_nombre).strip()
+    partes = texto.split()
+    
+    if orden == "Nombre(s) primero" and len(partes) >= 3:
+        # En la base: [Apellido Paterno] [Apellido Materno] [Nombres...]
+        apellidos = " ".join(partes[:2])
+        nombres = " ".join(partes[2:])
+        resultado = f"{nombres} {apellidos}"
+    else:
+        # Apellidos primero (tal como viene en la base de datos)
+        resultado = texto
+
+    if estilo == "Tipo Nombre Propio (Título)":
+        return resultado.title()
+    return resultado.upper()
+
+def limpiar_id_empleado(val):
+    if pd.isna(val):
+        return ""
+    try:
+        # Evitar que aparezca con punto decimal (ej. 7394.0 -> 7394)
+        return str(int(float(val))).strip()
+    except Exception:
+        return str(val).strip()
+
 def parse_coord_cm(val_str):
     if not val_str:
         return None
@@ -119,81 +166,60 @@ def obtener_y_cm(elem):
                 return v
     return None
 
+def asignar_texto_nodo(parrafo, nuevo_texto):
+    text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    spans = parrafo.findall(f"{{{text_ns}}}span")
+    if spans:
+        spans[0].text = nuevo_texto
+        for s in spans[1:]:
+            s.text = ""
+        parrafo.text = None
+    else:
+        parrafo.text = nuevo_texto
+
 def actualizar_textos_gafete(elemento, nombre, puesto, num_emp, folio_num):
     text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
     
     for p in elemento.iter(f"{{{text_ns}}}p"):
-        p_text = "".join(p.itertext())
-        if not p_text.strip():
+        p_text = "".join(p.itertext()).strip()
+        if not p_text:
             continue
-            
-        # 1. Nombre del empleado (Frente y Firma) - Limpio sin asteriscos
-        if "Citlalli" in p_text or "*Citlalli" in p_text:
-            spans = p.findall(f"{{{text_ns}}}span")
-            if spans:
-                spans[0].text = f"C. {nombre}"
-                for s in spans[1:]:
-                    s.text = ""
-            else:
-                p.text = f"C. {nombre}"
 
-        # 2. Puesto - Limpio sin asteriscos
-        elif "ANALISTA" in p_text or "*ANALISTA*" in p_text:
+        # 1. Nombre completo (Frente y Firma)
+        if "Citlalli" in p_text or "Brown" in p_text:
+            asignar_texto_nodo(p, f"C. {nombre}")
+
+        # 2. Puesto
+        elif "ANALISTA" in p_text:
             puesto_val = puesto if (pd.notna(puesto) and str(puesto).strip()) else ""
-            spans = p.findall(f"{{{text_ns}}}span")
-            if spans:
-                reemplazado = False
-                for s in spans:
-                    if s.text and "ANALISTA" in s.text:
-                        s.text = puesto_val
-                        reemplazado = True
-                    elif s.text:
-                        s.text = s.text.replace("*", "")
-                if not reemplazado:
-                    spans[0].text = puesto_val
-            else:
-                p.text = puesto_val
+            asignar_texto_nodo(p, puesto_val)
 
-        # 3. Código DDUMA-EMP- - Limpio sin asteriscos
-        elif "DDUMA-EMP-" in p_text:
-            spans = p.findall(f"{{{text_ns}}}span")
-            if spans:
-                spans[0].text = f"DDUMA-EMP-{num_emp}"
-                for s in spans[1:]:
-                    s.text = ""
-            else:
-                p.text = f"DDUMA-EMP-{num_emp}"
+        # 3. Código institucional DDUMA-EMP-[ID]
+        elif "DDUMA-EMP" in p_text:
+            asignar_texto_nodo(p, f"DDUMA-EMP-{num_emp}")
 
-        # 4. Número de empleado - Limpio sin asteriscos
-        elif "NO. DE EMPLEADO" in p_text:
-            spans = p.findall(f"{{{text_ns}}}span")
-            if spans:
-                spans[0].text = f"NO. DE EMPLEADO:{num_emp}"
-                for s in spans[1:]:
-                    s.text = ""
-            else:
-                p.text = f"NO. DE EMPLEADO:{num_emp}"
+        # 4. Número de empleado / ID
+        elif "NO. DE EMPLEADO" in p_text or "EMPLEADO:" in p_text:
+            asignar_texto_nodo(p, f"NO. DE EMPLEADO:{num_emp}")
 
-        # 5. Folio consecutivo - Limpio sin asteriscos
+        # 5. Folio consecutivo
         elif "/DDUMA/" in p_text:
-            nuevo_folio = f"{folio_num:03d}/DDUMA/2026 "
-            spans = p.findall(f"{{{text_ns}}}span")
-            if spans:
-                spans[0].text = nuevo_folio
-                for s in spans[1:]:
-                    s.text = ""
-            else:
-                p.text = nuevo_folio
+            asignar_texto_nodo(p, f"{folio_num:03d}/DDUMA/2026")
 
-        # Limpieza residual
+        # 6. Reemplazo de respaldo por si el número de empleado '9820' aparece suelto
+        elif "9820" in p_text:
+            texto_actualizado = p_text.replace("*9820*", num_emp).replace("9820", num_emp)
+            asignar_texto_nodo(p, texto_actualizado)
+
+        # Limpieza residual de cualquier asterisco que hubiera quedado
         if p.text and "*" in p.text:
             p.text = p.text.replace("*", "")
         for s in p.findall(f"{{{text_ns}}}span"):
             if s.text and "*" in s.text:
                 s.text = s.text.replace("*", "")
 
-# --- 5. GENERACIÓN ODP ---
-def generar_odp(df_seleccionados, fuente_plantilla):
+# --- 5. MOTOR DE GENERACIÓN ODP ---
+def generar_odp(df_seleccionados, fuente_plantilla, orden_nom, estilo_nom):
     if isinstance(fuente_plantilla, str):
         with open(fuente_plantilla, "rb") as f:
             template_bytes = f.read()
@@ -256,16 +282,28 @@ def generar_odp(df_seleccionados, fuente_plantilla):
             else:
                 elementos_abajo.append(el)
 
-        nom1 = str(emp1.get(col_nom, "")).strip()
-        num1 = str(emp1.get(col_num, "")).strip()
+        # 1. Asignar datos al gafete de arriba (Empleado 1)
+        nom1 = transformar_nombre(emp1.get(col_nom, ""), orden_nom, estilo_nom)
+        num1 = limpiar_id_empleado(emp1.get(col_num, ""))
         pto1 = str(emp1.get(col_pto, "")).strip() if pd.notna(emp1.get(col_pto)) else ""
+        if estilo_nom == "Tipo Nombre Propio (Título)":
+            pto1 = pto1.title()
+        else:
+            pto1 = pto1.upper()
+
         for el in elementos_arriba:
             actualizar_textos_gafete(el, nom1, pto1, num1, i + 1)
 
+        # 2. Asignar datos al gafete de abajo (Empleado 2)
         if emp2 is not None:
-            nom2 = str(emp2.get(col_nom, "")).strip()
-            num2 = str(emp2.get(col_num, "")).strip()
+            nom2 = transformar_nombre(emp2.get(col_nom, ""), orden_nom, estilo_nom)
+            num2 = limpiar_id_empleado(emp2.get(col_num, ""))
             pto2 = str(emp2.get(col_pto, "")).strip() if pd.notna(emp2.get(col_pto)) else ""
+            if estilo_nom == "Tipo Nombre Propio (Título)":
+                pto2 = pto2.title()
+            else:
+                pto2 = pto2.upper()
+
             for el in elementos_abajo:
                 actualizar_textos_gafete(el, nom2, pto2, num2, i + 2)
         else:
@@ -295,11 +333,10 @@ def convertir_odp_a_pptx(odp_bytes):
 
         if not cmd:
             raise RuntimeError(
-                "El comando LibreOffice no está disponible en el servidor para convertir a PowerPoint. "
-                "Asegúrate de agregar 'packages.txt' con la palabra 'libreoffice' en tu repositorio de GitHub."
+                "LibreOffice no está instalado en el servidor. Asegúrate de tener 'packages.txt' con 'libreoffice' en tu repositorio de GitHub."
             )
 
-        proceso = subprocess.run(
+        subprocess.run(
             [cmd, "--headless", "--convert-to", "pptx", input_odp, "--outdir", tmpdir],
             capture_output=True,
             text=True,
@@ -311,21 +348,21 @@ def convertir_odp_a_pptx(odp_bytes):
             with open(expected_pptx, "rb") as f:
                 return io.BytesIO(f.read())
         else:
-            raise RuntimeError(f"Error al convertir a PPTX: {proceso.stderr}")
+            raise RuntimeError("No se pudo completar la conversión a PPTX.")
 
 # --- 7. BOTÓN DE EXPORTACIÓN ---
 if st.button("Generar Gafetes", type="primary"):
     if not seleccionados:
-        st.warning("⚠️ Selecciona al menos a un empleado.")
+        st.warning("⚠️ Debes seleccionar al menos a un empleado.")
     else:
         df_filtrado = df[df[col_nom].isin(seleccionados)].copy()
         df_filtrado["_orden_sel"] = df_filtrado[col_nom].map({nombre: idx for idx, nombre in enumerate(seleccionados)})
         df_sel = df_filtrado.sort_values("_orden_sel").drop(columns=["_orden_sel"])
 
-        with st.spinner("Generando archivos..."):
+        with st.spinner("Generando gafetes con el formato seleccionado..."):
             try:
-                odp_buffer = generar_odp(df_sel, archivo_plantilla)
-                st.success(f"✅ ¡Gafetes procesados para {len(df_sel)} empleado(s)!")
+                odp_buffer = generar_odp(df_sel, archivo_plantilla, orden_nombre, estilo_capitalizacion)
+                st.success(f"✅ ¡Gafetes listos para {len(df_sel)} empleado(s)!")
 
                 if "ODP" in formato_salida:
                     st.download_button(
