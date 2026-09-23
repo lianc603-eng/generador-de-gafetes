@@ -10,42 +10,24 @@ import zipfile
 import pandas as pd
 import streamlit as st
 
-# Configuración de la interfaz
 st.set_page_config(page_title="Generador de Gafetes", page_icon="🪪", layout="wide")
 
 st.title("🪪 Generador de Gafetes Oficiales")
 st.write(
-    "Selecciona a los empleados requeridos para generar sus gafetes en formato **ODP** o **PowerPoint (PPTX)** "
-    "respetando la plantilla institucional (2 trabajadores por hoja)."
+    "Genera tus gafetes en formato **ODP** o **PowerPoint (PPTX)** con 2 trabajadores distintos por hoja tamaño Carta."
 )
 
-# --- 1. DETECCIÓN AUTOMÁTICA DE ARCHIVOS ---
-def buscar_plantilla_local():
-    posibles = [
-        "PLANTILLA MAESTRA.odp",
-        "plantilla_maestra.odp",
-        "Plantilla_Maestra.odp",
-        "Plantilla Maestra.odp",
-        "PLANTILLA_MAESTRA.odp",
-    ]
-    for p in posibles:
-        if os.path.exists(p):
-            return p
+# --- 1. DETECCIÓN DE ARCHIVOS ---
+def buscar_plantilla():
     for f in os.listdir("."):
         if f.lower().endswith(".odp"):
             return f
     return None
 
-archivo_plantilla = buscar_plantilla_local()
+archivo_plantilla = buscar_plantilla()
 
 @st.cache_data
 def cargar_base():
-    posibles_excel = ["base.xlsx", "BASE.xlsx", "Base.xlsx"]
-    for f in posibles_excel:
-        if os.path.exists(f):
-            df = pd.read_excel(f)
-            df.columns = [str(c).strip() for c in df.columns]
-            return df
     for f in os.listdir("."):
         if f.lower().endswith(".xlsx") and not f.startswith("~$"):
             df = pd.read_excel(f)
@@ -56,27 +38,25 @@ def cargar_base():
 df = cargar_base()
 
 if df is None:
-    st.error("❌ No se encontró el archivo 'base.xlsx' en el repositorio.")
+    st.error("❌ No se encontró el archivo Excel de empleados en el repositorio.")
     st.stop()
 
 if archivo_plantilla is None:
     st.error("❌ No se encontró la plantilla ODP en el repositorio.")
     st.stop()
 
-# Detección de columnas de la base de datos
 col_num = next((c for c in df.columns if "NUM" in c.upper() or "EMPLEADO" in c.upper()), "NUMERO DE EMPLEADO")
 col_nom = next((c for c in df.columns if "NOMBRE" in c.upper()), "Nombre completo")
 col_pto = next((c for c in df.columns if "PUESTO" in c.upper()), "Puesto")
 
-# --- 2. SELECTOR Y OPCIONES ---
+# --- 2. SELECTOR Y FORMATO ---
 col1, col2 = st.columns(2)
 with col1:
     seleccionar_todos = st.checkbox("Seleccionar todos los empleados de la lista")
-
 with col2:
     formato_salida = st.radio(
         "Formato de descarga:",
-        options=["ODP (LibreOffice)", "PPTX (PowerPoint)", "Ambos formatos (ZIP)"],
+        options=["ODP (LibreOffice)", "PPTX (PowerPoint)"],
         horizontal=True,
     )
 
@@ -87,7 +67,7 @@ if seleccionar_todos:
 else:
     seleccionados = st.multiselect("Empleados a generar:", opciones)
 
-# --- 3. REEMPLAZO DINÁMICO (EXCLUSIVAMENTE LO MARCADO CON *) ---
+# --- 3. FUNCIONES DE PROCESAMIENTO ---
 def limpiar_id(val):
     if pd.isna(val):
         return ""
@@ -96,7 +76,43 @@ def limpiar_id(val):
     except Exception:
         return str(val).strip()
 
-def aplicar_datos_a_elemento(elem, nombre, puesto, num_emp, folio):
+def parse_y_cm(elem):
+    """Calcula la posición vertical del elemento en cm."""
+    y_str = elem.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}y")
+    if not y_str:
+        for ch in elem.iter():
+            y_str = ch.attrib.get("{urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0}y")
+            if y_str:
+                break
+    if not y_str:
+        return None
+    y_clean = str(y_str).strip().lower()
+    try:
+        if y_clean.endswith("cm"):
+            return float(y_clean[:-2])
+        elif y_clean.endswith("mm"):
+            return float(y_clean[:-2]) / 10.0
+        elif y_clean.endswith("in"):
+            return float(y_clean[:-2]) * 2.54
+        elif y_clean.endswith("pt"):
+            return float(y_clean[:-2]) * (2.54 / 72.0)
+        return float(y_clean)
+    except Exception:
+        return None
+
+def asignar_texto_limpio(parrafo, texto_nuevo):
+    """Asigna el texto nuevo de forma limpia sin asteriscos ni duplicaciones."""
+    text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+    spans = parrafo.findall(f"{{{text_ns}}}span")
+    if spans:
+        spans[0].text = texto_nuevo
+        for s in spans[1:]:
+            s.text = ""
+        parrafo.text = None
+    else:
+        parrafo.text = texto_nuevo
+
+def procesar_elemento(elem, nombre, puesto, num_emp, folio):
     text_ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
 
     for p in elem.iter(f"{{{text_ns}}}p"):
@@ -104,74 +120,39 @@ def aplicar_datos_a_elemento(elem, nombre, puesto, num_emp, folio):
         if not p_text:
             continue
 
-        spans = p.findall(f"{{{text_ns}}}span")
+        # Evitar sobreescribir las etiquetas fijas
+        if p_text in ["Se autoriza al", "Como:", "Firma del Trabajador"]:
+            continue
 
-        # 1. Nombre completo (delimitado entre *...*)
-        if "C. *" in p_text or "autoriza al" in p_text or "Firma del" in p_text:
-            nuevo_texto = f"C. {nombre}"
-            if spans:
-                spans[0].text = nuevo_texto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = nuevo_texto
+        # 1. Caja de ID / Número de empleado (detecta 'ID:', 'ID :', 'NO. DE EMPLEADO', etc.)
+        if p_text.upper().startswith("ID:") or p_text.upper().startswith("ID :") or "ID:" in p_text.upper() or "ID :" in p_text.upper():
+            asignar_texto_limpio(p, f"ID: {num_emp}")
 
-        # 2. Puesto / Cargo (marcado con *...*)
-        elif "Como:" in p_text or ("*" in p_text and any(c.isalpha() for c in p_text) and not "/" in p_text and not "EMP" in p_text and not "EMPLEADO" in p_text):
-            if spans:
-                spans[0].text = puesto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = puesto
+        elif "NO. DE EMPLEADO" in p_text.upper() or "EMPLEADO:" in p_text.upper():
+            asignar_texto_limpio(p, f"NO. DE EMPLEADO:{num_emp}")
 
-        # 3. Código institucional DDUMA-EMP-*[ID]*
+        # 2. Código institucional DDUMA-EMP-
         elif "DDUMA-EMP" in p_text:
-            nuevo_texto = f"DDUMA-EMP-{num_emp}"
-            if spans:
-                spans[0].text = nuevo_texto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = nuevo_texto
+            asignar_texto_limpio(p, f"DDUMA-EMP-{num_emp}")
 
-        # 4. Etiqueta NO. DE EMPLEADO:*[ID]*
-        elif "NO. DE EMPLEADO" in p_text or "EMPLEADO:" in p_text:
-            nuevo_texto = f"NO. DE EMPLEADO:{num_emp}"
-            if spans:
-                spans[0].text = nuevo_texto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = nuevo_texto
+        # 3. Nombre del trabajador (Frente y Firma)
+        elif "Citlalli" in p_text or "Brown" in p_text or p_text.startswith("C. *") or p_text.startswith("C.*") or p_text.startswith("C. "):
+            asignar_texto_limpio(p, f"C. {nombre}")
 
-        # 5. Folio Consecutivo (*XXX*/DDUMA/2026)
+        # 4. Puesto del trabajador
+        elif "ANALISTA" in p_text or ("*" in p_text and any(c.isalpha() for c in p_text) and not "DDUMA" in p_text):
+            asignar_texto_limpio(p, puesto)
+
+        # 5. Folio Consecutivo
         elif "/DDUMA/" in p_text:
-            nuevo_texto = f"{folio:03d}/DDUMA/2026"
-            if spans:
-                spans[0].text = nuevo_texto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = nuevo_texto
+            asignar_texto_limpio(p, f"{folio:03d}/DDUMA/2026")
 
-        # 6. ID individual numérico delimitado con asteriscos (*...*)
+        # 6. Reemplazo de respaldo si hay un número suelto entre asteriscos
         elif re.search(r'\*\d+\*', p_text):
-            nuevo_texto = re.sub(r'\*\d+\*', num_emp, p_text)
-            if spans:
-                spans[0].text = nuevo_texto
-                for s in spans[1:]:
-                    s.text = ""
-                p.text = None
-            else:
-                p.text = nuevo_texto
+            nuevo = re.sub(r'\*\d+\*', num_emp, p_text)
+            asignar_texto_limpio(p, nuevo)
 
-        # 7. Limpieza final: eliminar cualquier asterisco residual
+        # Limpieza residual de cualquier asterisco que hubiera quedado
         if p.text and "*" in p.text:
             p.text = p.text.replace("*", "")
         for s in p.findall(f"{{{text_ns}}}span"):
@@ -213,7 +194,7 @@ def generar_odp(df_sel, ruta_plantilla):
     filas = list(df_sel.iterrows())
     num_hoja = 1
 
-    # Agrupar de 2 en 2 empleados por cada hoja Carta
+    # Agrupar de 2 en 2 trabajadores por página Carta
     for i in range(0, len(filas), 2):
         emp1 = filas[i][1]
         emp2 = filas[i + 1][1] if (i + 1 < len(filas)) else None
@@ -223,29 +204,39 @@ def generar_odp(df_sel, ruta_plantilla):
         num_hoja += 1
 
         elementos = [e for e in nueva_pagina if not e.tag.endswith("notes")]
-        mitad = len(elementos) // 2
 
-        elementos_arriba = elementos[:mitad]
-        elementos_abajo = elementos[mitad:]
+        # Separar por coordenada vertical: arriba (< 14 cm) y abajo (>= 14 cm)
+        elementos_arriba = []
+        elementos_abajo = []
 
-        # 1. Asignar datos al Trabajador 1 (Arriba)
+        for el in elementos:
+            y = parse_y_cm(el)
+            if y is not None:
+                if y < 14.0:
+                    elementos_arriba.append(el)
+                else:
+                    elementos_abajo.append(el)
+            else:
+                elementos_arriba.append(el)
+
+        # 1. Aplicar datos al Trabajador 1 (Arriba)
         nom1 = str(emp1.get(col_nom, "")).strip().upper()
         num1 = limpiar_id(emp1.get(col_num, ""))
         pto1 = str(emp1.get(col_pto, "")).strip().upper() if pd.notna(emp1.get(col_pto)) else ""
 
         for el in elementos_arriba:
-            aplicar_datos_a_elemento(el, nom1, pto1, num1, i + 1)
+            procesar_elemento(el, nom1, pto1, num1, i + 1)
 
-        # 2. Asignar datos al Trabajador 2 (Abajo)
+        # 2. Aplicar datos al Trabajador 2 (Abajo)
         if emp2 is not None:
             nom2 = str(emp2.get(col_nom, "")).strip().upper()
             num2 = limpiar_id(emp2.get(col_num, ""))
             pto2 = str(emp2.get(col_pto, "")).strip().upper() if pd.notna(emp2.get(col_pto)) else ""
 
             for el in elementos_abajo:
-                aplicar_datos_a_elemento(el, nom2, pto2, num2, i + 2)
+                procesar_elemento(el, nom2, pto2, num2, i + 2)
         else:
-            # Si se seleccionó un número impar de empleados, se retira el gafete sobrante
+            # Si el total seleccionado es impar, se eliminan los elementos del gafete de abajo
             for el in elementos_abajo:
                 nueva_pagina.remove(el)
 
@@ -257,39 +248,7 @@ def generar_odp(df_sel, ruta_plantilla):
     out_buffer.seek(0)
     return out_buffer
 
-# --- 5. CONVERSIÓN A POWERPOINT (PPTX) ---
-def convertir_odp_a_pptx(odp_bytes):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_odp = os.path.join(tmpdir, "gafetes.odp")
-        with open(input_odp, "wb") as f:
-            f.write(odp_bytes.getvalue())
-
-        cmd = None
-        for executable in ["libreoffice", "soffice"]:
-            if shutil.which(executable):
-                cmd = executable
-                break
-
-        if not cmd:
-            raise RuntimeError(
-                "LibreOffice no está instalado en el servidor. Asegúrate de tener 'packages.txt' con 'libreoffice' en tu repositorio de GitHub."
-            )
-
-        subprocess.run(
-            [cmd, "--headless", "--convert-to", "pptx", input_odp, "--outdir", tmpdir],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-        expected_pptx = os.path.join(tmpdir, "gafetes.pptx")
-        if os.path.exists(expected_pptx):
-            with open(expected_pptx, "rb") as f:
-                return io.BytesIO(f.read())
-        else:
-            raise RuntimeError("No se pudo completar la conversión a PPTX.")
-
-# --- 6. BOTÓN DE EXPORTACIÓN ---
+# --- 5. EXPORTACIÓN ---
 if st.button("Generar Gafetes", type="primary"):
     if not seleccionados:
         st.warning("⚠️ Debes seleccionar al menos a un empleado.")
@@ -298,42 +257,34 @@ if st.button("Generar Gafetes", type="primary"):
         df_filtrado["_orden"] = df_filtrado[col_nom].map({nombre: idx for idx, nombre in enumerate(seleccionados)})
         df_final = df_filtrado.sort_values("_orden").drop(columns=["_orden"])
 
-        with st.spinner("Generando gafetes sin asteriscos..."):
+        with st.spinner("Creando archivo con los gafetes..."):
             try:
-                odp_buffer = generar_odp(df_final, archivo_plantilla)
+                odp_bytes = generar_odp(df_final, archivo_plantilla)
                 st.success(f"✅ ¡Gafetes listos para {len(df_final)} persona(s)!")
 
                 if "ODP" in formato_salida:
                     st.download_button(
                         label="📥 Descargar en ODP (LibreOffice)",
-                        data=odp_buffer.getvalue(),
+                        data=odp_bytes.getvalue(),
                         file_name="Gafetes_Generados.odp",
                         mime="application/vnd.oasis.opendocument.presentation",
                     )
-
-                if "PPTX" in formato_salida:
-                    pptx_buffer = convertir_odp_a_pptx(odp_buffer)
-                    st.download_button(
-                        label="📥 Descargar en PowerPoint (.pptx)",
-                        data=pptx_buffer.getvalue(),
-                        file_name="Gafetes_Generados.pptx",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    )
-
-                if "Ambos" in formato_salida:
-                    pptx_buffer = convertir_odp_a_pptx(odp_buffer)
-                    zip_salida = io.BytesIO()
-                    with zipfile.ZipFile(zip_salida, "w", zipfile.ZIP_DEFLATED) as z:
-                        z.writestr("Gafetes_Generados.odp", odp_buffer.getvalue())
-                        z.writestr("Gafetes_Generados.pptx", pptx_buffer.getvalue())
-                    zip_salida.seek(0)
-
-                    st.download_button(
-                        label="📥 Descargar Ambos Formatos (.zip)",
-                        data=zip_salida.getvalue(),
-                        file_name="Gafetes_ODP_y_PPTX.zip",
-                        mime="application/zip",
-                    )
-
+                else:
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        odp_temp = os.path.join(tmpdir, "temp.odp")
+                        with open(odp_temp, "wb") as f:
+                            f.write(odp_bytes.getvalue())
+                        subprocess.run(
+                            ["libreoffice", "--headless", "--convert-to", "pptx", odp_temp, "--outdir", tmpdir],
+                            check=True,
+                            timeout=60,
+                        )
+                        with open(os.path.join(tmpdir, "temp.pptx"), "rb") as f:
+                            st.download_button(
+                                label="📥 Descargar en PowerPoint (.pptx)",
+                                data=f.read(),
+                                file_name="Gafetes_Generados.pptx",
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            )
             except Exception as e:
-                st.error(f"Error durante el procesamiento: {e}")
+                st.error(f"Error: {e}")
